@@ -538,9 +538,44 @@ def measure_gateway_rtt(gateway_ip):
             return 1.0
     return None
 
+def ensure_wlan_profile(profile_name):
+    """确保目标无线 Profile 存在于系统，若被用户'忘记网络'则自动重建为自动连接模式"""
+    xml_content = f"""<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+    <name>{profile_name}</name>
+    <SSIDConfig>
+        <SSID>
+            <name>{profile_name}</name>
+        </SSID>
+    </SSIDConfig>
+    <connectionType>ESS</connectionType>
+    <connectionMode>auto</connectionMode>
+    <MSM>
+        <security>
+            <authEncryption>
+                <authentication>open</authentication>
+                <encryption>none</encryption>
+                <useOneX>false</useOneX>
+            </authEncryption>
+        </security>
+    </MSM>
+</WLANProfile>"""
+    try:
+        temp_dir = os.environ.get("TEMP") or "."
+        profile_path = os.path.join(temp_dir, f"{profile_name}_autogen.xml")
+        with open(profile_path, "w", encoding="ascii") as f:
+            f.write(xml_content)
+        rc, out = run_silent_cmd(["netsh", "wlan", "add", "profile", f"filename={profile_path}", "user=all"])
+        return rc == 0
+    except Exception:
+        return False
+
 def connect_wlan(profile_name):
-    """连接指定无线 Profile"""
+    """连接指定无线 Profile，若 Profile 丢失则自动恢复"""
     rc, out = run_silent_cmd(["netsh", "wlan", "connect", f"name={profile_name}"])
+    if rc != 0 or any(w in out for w in ("not found", "找不到", "不存在")):
+        ensure_wlan_profile(profile_name)
+        rc, out = run_silent_cmd(["netsh", "wlan", "connect", f"name={profile_name}"])
     return rc == 0
 
 def disconnect_wlan():
