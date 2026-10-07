@@ -448,6 +448,21 @@ def get_wlan_detail():
                 m = re.search(r"([\d\.]+)", v)
                 if m:
                     res["tx_rate"] = float(m.group(1))
+
+    # Windows 11 非管理员或未开启位置服务时 netsh wlan show interfaces 可能会受限 (错误码 5)
+    if not res["connected"] or not res["ssid"]:
+        try:
+            rc2, out2 = run_silent_cmd(["powershell", "-NoProfile", "-Command", "(Get-NetConnectionProfile -InterfaceAlias WLAN -ErrorAction SilentlyContinue).Name"], timeout=4)
+            if rc2 == 0 and out2.strip():
+                name = out2.strip()
+                res["connected"] = True
+                res["ssid"] = name
+                res["profile"] = name
+                if res["signal"] == 0:
+                    res["signal"] = 80
+        except Exception:
+            pass
+
     return res
 
 def scan_candidate_aps(target_ssid="i-NAU"):
@@ -625,11 +640,12 @@ SESSION_ACTIVE = 1
 NO_SESSION = 0
 QUERY_ERROR = -1
 
-def check_portal_online(portal_ip, local_ip):
+def check_portal_online(portal_ip, local_ip, bind_source=False):
     """三态检查 local_ip 是否在门户在线"""
     url = f"http://{portal_ip}/api/portal/v1/getinfo"
+    src = local_ip if bind_source else None
     try:
-        status, body, _ = http_request(url, source_ip=local_ip, timeout=6)
+        status, body, _ = http_request(url, source_ip=src, timeout=6)
         data = json.loads(body)
         rows = ((data.get("results") or {}).get("rows") or [])
         for row in rows:
@@ -638,9 +654,22 @@ def check_portal_online(portal_ip, local_ip):
                 return SESSION_ACTIVE, row, f"session active for {local_ip} (user={row.get('username')})"
         return NO_SESSION, None, f"no active session for {local_ip} in portal getinfo"
     except Exception as e:
+        if bind_source:
+            # 尝试不绑定源 IP 进行回退探测
+            try:
+                status, body, _ = http_request(url, source_ip=None, timeout=6)
+                data = json.loads(body)
+                rows = ((data.get("results") or {}).get("rows") or [])
+                for row in rows:
+                    user_ip = int_to_ipv4(row.get("user_ipv4"))
+                    if user_ip and user_ip == local_ip:
+                        return SESSION_ACTIVE, row, f"session active for {local_ip} (user={row.get('username')})"
+                return NO_SESSION, None, f"no active session for {local_ip} in portal getinfo"
+            except Exception:
+                pass
         return QUERY_ERROR, None, f"portal query failed: {e}"
 
-def portal_login(portal_ip, local_ip, settings):
+def portal_login(portal_ip, local_ip, settings, bind_source=False):
     """向校园网门户发送登录认证请求"""
     url = f"http://{portal_ip}/api/portal/v1/login"
     payload = {
@@ -651,8 +680,9 @@ def portal_login(portal_ip, local_ip, settings):
     if not payload["username"] or not payload["password"]:
         return False, "login aborted: NAU_USERNAME or NAU_PASSWORD not configured"
         
+    src = local_ip if bind_source else None
     try:
-        status, body, _ = http_request(url, source_ip=local_ip, data=payload, timeout=8)
+        status, body, _ = http_request(url, source_ip=src, data=payload, timeout=8)
         resp = json.loads(body)
         rc = resp.get("reply_code")
         msg = resp.get("reply_msg") or ""
@@ -662,6 +692,19 @@ def portal_login(portal_ip, local_ip, settings):
         else:
             return False, f"login rejected (reply_code={rc}, msg={msg})"
     except Exception as e:
+        if bind_source:
+            try:
+                status, body, _ = http_request(url, source_ip=None, data=payload, timeout=8)
+                resp = json.loads(body)
+                rc = resp.get("reply_code")
+                msg = resp.get("reply_msg") or ""
+                if rc == 0:
+                    user = (resp.get("results") or {}).get("username") or settings.get("USERNAME")
+                    return True, f"login success (reply_code=0, user={user})"
+                else:
+                    return False, f"login rejected (reply_code={rc}, msg={msg})"
+            except Exception:
+                pass
         return False, f"login request error: {e}"
 
 def check_external_probe(probe_url, source_ip=None, timeout=8):
@@ -798,7 +841,8 @@ def run_daemon():
 
                 # 若未连接目标校园网，执行连接
                 if not wlan_detail["connected"] or curr_ssid != wlan_profile:
-                    log("WARN", f"Wired is down. Connecting to wireless profile '{wlan_profile}'...")
+                    reason_msg = "Wired is down" if settings.get("ETH_NAME") else "WLAN is not connected"
+                    log("WARN", f"{reason_msg}. Connecting to wireless profile '{wlan_profile}'...")
                     connect_wlan(wlan_profile)
                     for _ in range(5):
                         time.sleep(2)
@@ -808,9 +852,9 @@ def run_daemon():
                             break
                             
                 # 无线 IP 与门户登录保活
-                if wlan_info["ip"]:
+                if wlan_info["state"] == "connected" and wlan_info["ip"]:
                     wlan_ip = wlan_info["ip"]
-                    sess_state, sess, reason = check_portal_online(portal_ip, wlan_ip)
+                    sess_state, sess, reason = check_portal_online(portal_ip, wlan_ip, bind_source=False)
                     wlan_online = False
                     
                     if sess_state == SESSION_ACTIVE:
@@ -823,7 +867,7 @@ def run_daemon():
                             log("WARN", f"WLAN portal online but probe failed: {probe_msg}")
                     elif sess_state == NO_SESSION:
                         log("WARN", f"WLAN is UP ({wlan_ip}) but not logged in. Logging in...")
-                        ok, login_msg = portal_login(portal_ip, wlan_ip, settings)
+                        ok, login_msg = portal_login(portal_ip, wlan_ip, settings, bind_source=False)
                         if ok:
                             log("INFO", f"WLAN portal login success: {login_msg}")
                             probe_ok, probe_msg = check_external_probe(detect_url)
@@ -835,6 +879,14 @@ def run_daemon():
                             backoff = min(backoff * 2, 300)
                     else:
                         log("WARN", f"WLAN portal query transient error: {reason}")
+                        # 回退：若查询门户会话出错且外网探测不通，主动尝试一次登录
+                        probe_ok, _ = check_external_probe(detect_url, timeout=3)
+                        if not probe_ok:
+                            log("INFO", "External probe failed after portal error. Attempting login as recovery...")
+                            ok, login_msg = portal_login(portal_ip, wlan_ip, settings, bind_source=False)
+                            if ok:
+                                log("INFO", f"Recovery portal login success: {login_msg}")
+                                backoff = check_interval
 
                     # ----------------- 步骤 4: 无线 AP 智能优选 (打破粘连) -----------------
                     if wlan_online and settings["ENABLE_AP_OPTIMIZE"]:
@@ -890,7 +942,7 @@ def run_daemon():
                                 log("DEBUG", "AP optimization triggered but cooldown is active or daily limit reached.")
                 else:
                     log("WARN", "WLAN is associating, waiting for valid IPv4...")
-                    backoff = min(backoff * 2, 60)
+                    backoff = 5
 
         except Exception as exc:
             log("ERROR", f"Daemon main loop exception: {exc}")

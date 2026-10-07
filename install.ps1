@@ -55,6 +55,7 @@ function Get-PythonwPath {
     
     # 2. 常见安装路径扫描
     $searchPaths = @(
+        (Join-Path $env:USERPROFILE ".dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\pythonw.exe"),
         "D:\Anconda\pythonw.exe",
         "C:\ProgramData\anaconda3\pythonw.exe",
         "C:\ProgramData\miniconda3\pythonw.exe",
@@ -77,19 +78,46 @@ function Get-PythonwPath {
 }
 
 function Get-PythonCliPath {
-    $pyCmd = Get-Command "python" -ErrorAction SilentlyContinue
-    if ($pyCmd) { return $pyCmd.Source }
     $pw = Get-PythonwPath
     $py = $pw -replace "pythonw\.exe$", "python.exe"
     if (Test-Path $py) { return $py }
+    $pyCmd = Get-Command "python" -ErrorAction SilentlyContinue
+    if ($pyCmd -and $pyCmd.Source -notmatch "WindowsApps") { return $pyCmd.Source }
     return "python"
 }
 
 function Get-RunningProcess {
-    $procs = Get-CimInstance Win32_Process | Where-Object {
-        $_.Name -match "^python" -and $_.CommandLine -match "nau_autologin\.pyw"
+    try {
+        $procs = Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+            $_.Name -match "^python" -and $_.CommandLine -match "nau_autologin\.pyw"
+        }
+        if ($procs) { return $procs }
+    } catch {}
+
+    $pidFile = Join-Path $DeployDir "daemon.pid"
+    if (Test-Path $pidFile) {
+        $savedPid = Get-Content $pidFile -ErrorAction SilentlyContinue
+        if ($savedPid -match '^\d+$') {
+            $proc = Get-Process -Id ([int]$savedPid) -ErrorAction SilentlyContinue
+            if ($proc -and $proc.ProcessName -match "^python") {
+                return @([PSCustomObject]@{
+                    ProcessId = $proc.Id
+                    CommandLine = "pythonw.exe (PID $($proc.Id))"
+                })
+            }
+        }
     }
-    return $procs
+    
+    $pw = Get-Process -Name "pythonw" -ErrorAction SilentlyContinue
+    if ($pw) {
+        return @($pw | ForEach-Object {
+            [PSCustomObject]@{
+                ProcessId = $_.Id
+                CommandLine = "pythonw.exe (PID $($_.Id))"
+            }
+        })
+    }
+    return @()
 }
 
 # ----------------- 操作分支 -----------------
@@ -173,9 +201,11 @@ if ($oldProcs) {
     }
 }
 # 同时也停掉旧的 CampusPortalKeepalive / portal_keepalive_win 进程
-$legacyProcs = Get-CimInstance Win32_Process | Where-Object {
-    $_.Name -match "^python" -and $_.CommandLine -match "portal_keepalive_win\.pyw"
-}
+$legacyProcs = try {
+    Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+        $_.Name -match "^python" -and $_.CommandLine -match "portal_keepalive_win\.pyw"
+    }
+} catch { @() }
 if ($legacyProcs) {
     Write-Host "正在清理旧版 win-portal-keepalive 进程..." -ForegroundColor Yellow
     foreach ($p in $legacyProcs) {
@@ -218,6 +248,9 @@ Write-Host "已配置开机静默自启动: $AppName" -ForegroundColor Green
 # 启动后台守护进程 (无控制台窗口)
 Write-Host "正在启动后台守护进程..." -ForegroundColor Cyan
 $p = Start-Process -FilePath $pythonw -ArgumentList "`"$TargetScript`"" -PassThru -WindowStyle Hidden
+if ($p -and $p.Id) {
+    $p.Id | Set-Content (Join-Path $DeployDir "daemon.pid")
+}
 Start-Sleep -Seconds 2
 
 # 复核状态
@@ -234,3 +267,5 @@ if ($running) {
 } else {
     Write-Host "启动后进程未检测到，请查看日志: $LogFile" -ForegroundColor Yellow
 }
+
+
