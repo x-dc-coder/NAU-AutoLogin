@@ -1,0 +1,16 @@
+# 敏感凭据文件（严禁提交）
+.env
+*.env
+!*.env.example
+
+# 运行日志
+*.log
+logs/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 本地部署与运行时缓存
+.nau-autologin/
+.portal-keepalive/
