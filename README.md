@@ -49,8 +49,8 @@ NAU-AutoLogin/
 ### 1. 配置认证凭据 (`.env`)
 复制 `.env.example` 为 `.env` 并填写实际账号信息：
 ```ini
-NAU_USERNAME=mp2609026
-NAU_PASSWORD=你的密码
+NAU_USERNAME=your_student_id
+NAU_PASSWORD=your_password
 NAU_PORTAL_IP=10.255.254.23
 NAU_DOMAIN=default
 NAU_DETECT_URL=http://connect.rom.miui.com/generate_204
