@@ -24,7 +24,8 @@ param(
     [switch]$Stop,
     [switch]$Restart,
     [switch]$Uninstall,
-    [switch]$Diagnose
+    [switch]$Diagnose,
+    [switch]$Sessions
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,6 +37,8 @@ $TargetScript = Join-Path $DeployDir "nau_autologin.pyw"
 $TargetConfig = Join-Path $DeployDir "config.ini"
 $TargetEnv = Join-Path $DeployDir ".env"
 $TargetDiagnose = Join-Path $DeployDir "diagnose.py"
+$TargetSessionManager = Join-Path $DeployDir "session_manager.py"
+$TargetSessions = Join-Path $DeployDir "sessions.py"
 $LogFile = Join-Path $DeployDir "autologin.log"
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -126,6 +129,14 @@ if ($Diagnose) {
     $pyCli = Get-PythonCliPath
     $diagScript = if (Test-Path $TargetDiagnose) { $TargetDiagnose } else { Join-Path $PSScriptRoot "diagnose.py" }
     & $pyCli $diagScript
+    exit 0
+}
+
+if ($Sessions) {
+    # 会话管理: 透传参数给 sessions.py, 如 -Sessions -l / -Sessions -k 10.200.34.163 / -Sessions -w
+    $pyCli = Get-PythonCliPath
+    $sessScript = if (Test-Path $TargetSessions) { $TargetSessions } else { Join-Path $PSScriptRoot "sessions.py" }
+    & $pyCli $sessScript @args
     exit 0
 }
 
@@ -224,6 +235,8 @@ $sourceDir = $PSScriptRoot
 Write-Host "正在同步文件至 $DeployDir ..." -ForegroundColor Cyan
 Copy-Item (Join-Path $sourceDir "nau_autologin.pyw") $TargetScript -Force
 Copy-Item (Join-Path $sourceDir "diagnose.py") $TargetDiagnose -Force
+Copy-Item (Join-Path $sourceDir "session_manager.py") $TargetSessionManager -Force
+Copy-Item (Join-Path $sourceDir "sessions.py") $TargetSessions -Force
 
 # 同步 config.ini
 $srcConfig = Join-Path $sourceDir "config.ini"

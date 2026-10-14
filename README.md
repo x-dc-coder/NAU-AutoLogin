@@ -38,6 +38,8 @@ NAU-AutoLogin/
 ├── config.ini            # 运行策略配置 (网卡名称、检测周期、AP 优选参数等)
 ├── nau_autologin.pyw     # 核心守护进程 (pythonw 静默常驻、双网卡调度、AP 优选)
 ├── diagnose.py           # 多维只读自检与 AP 诊断工具 (单次运行输出完整状态)
+├── session_manager.py    # 门户会话管理 (在线列表/强制下线/IP 交接清理, 纯标准库跨平台)
+├── sessions.py           # 会话管理命令行工具 (列表/下线/流量巡检/历史详单)
 ├── install.ps1           # Windows PowerShell 运维管理脚本 (部署自启、状态、停止等)
 └── README.md             # 本文档
 ```
@@ -117,7 +119,60 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall
 
 ---
 
-## 五、AP 智能优选工作机制说明
+## 五、多设备会话管理与"幽灵会话"清理
+
+### 1. 什么是幽灵会话
+
+校园网门户按 **IP** 统计在线会话。设备关机、重启、睡眠唤醒或无线漫游导致换 IP 时，
+若未显式注销，旧 IP 的会话会一直残留直到门户空闲超时（通常 30 分钟 ~ 2 小时），
+形成"幽灵会话"，白占账号的在线设备名额，严重时新设备无法登录。
+
+### 2. IP 交接清理（自动，守护进程内置）
+
+守护进程为每个网卡在本地 `state.json` 中记录最近使用过的 IP。当本次登录的 IP
+与历史记录不一致时（DHCP 续租、AP 优选重连、睡眠唤醒、重启换 IP），自动把旧 IP
+的残留会话强制下线：
+
+- **只清理"本账号在线列表中存在"的旧 IP**，绝不会误伤其他设备（树莓派/笔记本/手机）；
+- 当前 IP 永不下线，旧 IP 已被 DHCP 回收时自动跳过；
+- IP 未变化时零 HTTP 开销；
+- 清理失败只记日志，不影响保活主流程；
+- 可在 `config.ini` 的 `[session_mgmt]` 段中关闭或调整记忆深度。
+
+### 3. sessions.py 会话管理工具（手动清理其他设备的幽灵会话）
+
+```powershell
+# 列出账号全部在线会话 (IP / MAC / 区域 / 上线时间 / 实时流量)
+python sessions.py -l
+
+# 按 IP 或会话 id 强制下线
+python sessions.py -k 10.200.34.163
+python sessions.py -k 393587733
+
+# 下线全部会话 (保留指定 IP 不下线)
+python sessions.py -k-all --exclude 10.100.109.52
+
+# 流量巡检: 两次采样, 找出"零流量且上线较久"的疑似幽灵会话 (只建议, 不自动杀)
+python sessions.py -w --interval 600 --min-age 1800
+
+# 历史会话详单 (核对某设备何时认证/掉线/漫游路径)
+python sessions.py -d
+```
+
+也可通过运维脚本一键调用：`powershell -ExecutionPolicy Bypass -File install.ps1 -Sessions -l`
+
+### 4. 门户自服务接口备忘（实测于认证服务器）
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/api/selfservice/v1/online` | 在线会话列表（含 id/IP/MAC/区域/流量/时长） |
+| POST | `/api/selfservice/v1/online/kick/{id}` | 强制下线指定会话 |
+| GET | `/api/selfservice/v1/acctdetail/{YYYYMM}` | 历史会话详单 |
+| GET | `/api/selfservice/v1/authlog` | 认证日志 |
+
+---
+
+## 六、AP 智能优选工作机制说明
 
 1. **去抖判定（Debounce）**：网卡当前信号低于 `weak_signal_threshold`（默认 45%）或网关 RTT 高于 `high_rtt_threshold_ms`（默认 150ms），连续达到 `debounce_cycles`（默认 2 个周期 = 60s）才确认链路劣化。
 2. **滞回评估（Hysteresis）**：扫描周围所有同 SSID AP，仅当存在信号高出当前 AP `hysteresis_margin`（默认 15%）以上的强信号 AP 时才触发动作，避免在信号接近的 AP 间来回震荡。

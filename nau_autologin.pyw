@@ -166,6 +166,10 @@ def load_settings():
         "COOLDOWN_SECONDS": cfg.getint("ap_optimization", "cooldown_seconds", fallback=300),
         "MAX_DAILY_REASSOCIATIONS": cfg.getint("ap_optimization", "max_daily_reassociations", fallback=15),
         
+        # 会话管理 (IP 交接清理, 替代白名单方案)
+        "ENABLE_SESSION_CLEANUP": cfg.getboolean("session_mgmt", "enable_session_cleanup", fallback=True),
+        "RECENT_IPS_MAX": cfg.getint("session_mgmt", "recent_ips_max", fallback=5),
+
         # 日志
         "LOG_PATH": cfg.get("logging", "log_path", fallback="").strip(),
         "LOG_MAX_BYTES": cfg.getint("logging", "log_max_bytes", fallback=5242880),
@@ -756,6 +760,20 @@ def check_external_probe(probe_url, source_ip=None, timeout=8):
 
 # ==================== 核心守护进程循环 ====================
 
+def session_cleanup(adapter_key, ip, settings):
+    """
+    IP 交接清理 (懒加载 session_manager, 避免与 __main__ 形成双重模块实例):
+    当本机 IP 发生过变更时, 强制下线旧 IP 在门户上的残留会话,
+    从源头杜绝"一台设备占多个在线名额"的幽灵会话。
+    任何异常只记日志, 不影响保活主流程。
+    """
+    try:
+        from session_manager import cleanup_stale_sessions
+        cleanup_stale_sessions(adapter_key, ip, settings, logger=log)
+    except Exception as e:
+        log("WARN", f"[会话交接] 清理模块加载失败, 本次跳过: {e}")
+
+
 def run_daemon():
     """主调度循环"""
     settings = load_settings()
@@ -843,6 +861,9 @@ def run_daemon():
                 backoff = check_interval
                 log("INFO", f"WIRED OK (ip={eth_info['ip']}, stable_cycles={wired_healthy_cycles}/{wired_stable_target})")
                 
+                # IP 交接清理: 有线 IP 变更后, 下线旧 IP 的残留门户会话
+                session_cleanup(eth_name, eth_info["ip"], settings)
+                
                 if disconnect_wlan_on_wired and wired_healthy_cycles >= wired_stable_target:
                     if wlan_info["state"] == "connected":
                         log("INFO", "Wired connection is stable. Disconnecting WLAN to prioritize wired.")
@@ -923,6 +944,10 @@ def run_daemon():
                                 log("INFO", f"Recovery portal login success: {login_msg}")
                                 backoff = check_interval
 
+                    # IP 交接清理: 无线 IP 变更后, 第一时间下线旧 IP 的残留门户会话
+                    if wlan_online:
+                        session_cleanup(wlan_name, wlan_ip, settings)
+
                     # ----------------- 步骤 4: 无线 AP 智能优选 (打破粘连) -----------------
                     if wlan_online and settings["ENABLE_AP_OPTIMIZE"]:
                         wlan_status = get_wlan_detail()
@@ -968,6 +993,8 @@ def run_daemon():
                                         if p_state != SESSION_ACTIVE:
                                             log("INFO", f"Portal session expired after AP re-association. Re-authenticating {new_wlan_ip}...")
                                             portal_login(portal_ip, new_wlan_ip, settings)
+                                    # AP 重选后立即做 IP 交接清理 (旧 IP 残留会话第一时间下线)
+                                    session_cleanup(wlan_name, new_wlan_ip, settings)
                                     new_status = get_wlan_detail()
                                     log("INFO", f"AP Optimization finished: now on [{new_status['bssid']}] ch{new_status['channel']}, Signal={new_status['signal']}%, Rate={new_status['rx_rate']}/{new_status['tx_rate']} Mbps")
                                 else:
