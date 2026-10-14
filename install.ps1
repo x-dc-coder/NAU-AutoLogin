@@ -24,8 +24,7 @@ param(
     [switch]$Stop,
     [switch]$Restart,
     [switch]$Uninstall,
-    [switch]$Diagnose,
-    [switch]$Sessions
+    [switch]$Diagnose
 )
 
 $ErrorActionPreference = "Stop"
@@ -129,14 +128,6 @@ if ($Diagnose) {
     $pyCli = Get-PythonCliPath
     $diagScript = if (Test-Path $TargetDiagnose) { $TargetDiagnose } else { Join-Path $PSScriptRoot "diagnose.py" }
     & $pyCli $diagScript
-    exit 0
-}
-
-if ($Sessions) {
-    # 会话管理: 透传参数给 sessions.py, 如 -Sessions -l / -Sessions -k 10.200.34.163 / -Sessions -w
-    $pyCli = Get-PythonCliPath
-    $sessScript = if (Test-Path $TargetSessions) { $TargetSessions } else { Join-Path $PSScriptRoot "sessions.py" }
-    & $pyCli $sessScript @args
     exit 0
 }
 

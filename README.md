@@ -159,7 +159,13 @@ python sessions.py -w --interval 600 --min-age 1800
 python sessions.py -d
 ```
 
-也可通过运维脚本一键调用：`powershell -ExecutionPolicy Bypass -File install.ps1 -Sessions -l`
+也可在任意终端直接运行（注意用 `python.exe` 而非 `pythonw.exe`，后者无控制台输出）：
+
+```powershell
+python "$env:USERPROFILE\.nau-autologin\sessions.py" -l
+python "$env:USERPROFILE\.nau-autologin\sessions.py" -k 10.200.34.163
+python "$env:USERPROFILE\.nau-autologin\sessions.py" -w
+```
 
 ### 4. 门户自服务接口备忘（实测于认证服务器）
 
