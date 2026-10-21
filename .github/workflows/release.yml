@@ -21,6 +21,21 @@ jobs:
           tar -tzf "$TAR" | head -20
           echo "TAR_NAME=$TAR" >> "$GITHUB_ENV"
 
+      - name: 契约预检（deploy.yml 完整性 + 包结构 + tag 格式）
+        run: |
+          python3 - <<'CHECK'
+          import re, sys, tarfile, os
+          tar = os.environ["TAR_NAME"]
+          assert re.match(r"^v\d+\.\d+\.\d+$", os.environ.get("GITHUB_REF_NAME", "")), "tag 必须是 vX.Y.Z"
+          assert os.path.exists("deploy.yml"), "缺少 deploy.yml"
+          need = ["session_manager.py", "linux/nau_keepalive.py", "linux/config.ini.example", ".env.example", "deploy.yml"]
+          with tarfile.open(tar) as t:
+              names = t.getnames()
+          missing = [f for f in need if not any(n == f or n.endswith("/" + f) for n in names)]
+          assert not missing, f"包缺少必需文件: {missing}"
+          print("契约预检通过 ✓")
+          CHECK
+
       - uses: actions/upload-artifact@v4
         with:
           name: linux-package
