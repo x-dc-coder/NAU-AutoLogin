@@ -1,0 +1,10 @@
+# deploy.yml — 部署契约声明（contract-check.sh 消费；随代码版本化）
+# 结构变更需同步 pi 侧骨架的解析器子集，见 ~/projects/terraform/scripts/nau_contract_check.sh
+app: nau-autologin
+contract:
+  required_paths: [session_manager.py, linux/nau_keepalive.py, linux/config.ini.example, .env.example]
+  env_keys: [NAU_USERNAME, NAU_PASSWORD, NAU_PORTAL_IP, NAU_DETECT_URL, NAU_DOMAIN]
+  health_marker: "外网连通|门户登录成功"
+  health_timeout: 90
+  max_asset_mb: 50
+  unit_extras: []
