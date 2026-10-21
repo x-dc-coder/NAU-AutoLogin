@@ -1,0 +1,41 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 打包 linux 部署包（git archive 精选路径）
+        run: |
+          VER="${{ github.ref_name }}"
+          TAR="nau-autologin-${VER}-linux.tar.gz"
+          git archive --format=tar.gz -o "$TAR" "$VER" \
+            -- session_manager.py sessions.py linux deploy .env.example README.md
+          tar -tzf "$TAR" | head -20
+          echo "TAR_NAME=$TAR" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-package
+          path: nau-autologin-*-linux.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-package
+
+      - name: 创建 GitHub Release 并附加部署包
+        uses: softprops/action-gh-release@v2
+        with:
+          files: nau-autologin-*-linux.tar.gz
+          generate_release_notes: true
