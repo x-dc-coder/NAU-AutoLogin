@@ -1,0 +1,32 @@
+# NAU-AutoLogin Linux 保活守护 systemd 单元 (由 deploy/install.sh 渲染占位符后
+# 安装到 /etc/systemd/system/nau-autologin.service)
+# 占位符: __APP_USER__ 守护运行用户 / __APP_DIR__ 安装目录 / __PYTHON__ 解释器绝对路径
+# 日志: stdout -> journald (journalctl -u nau-autologin -f), 轮转交给 journald
+
+[Unit]
+Description=NAU campus portal keepalive (i-NAU auto login)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+WorkingDirectory=__APP_DIR__/current
+ExecStart=__PYTHON__ __APP_DIR__/current/linux/nau_keepalive.py
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=always
+RestartSec=5
+SyslogIdentifier=nau-autologin
+StandardOutput=journal
+StandardError=journal
+
+# 守护进程无状态、不写任何文件 (配置/凭据只读), 最小权限加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=__APP_DIR__
+
+[Install]
+WantedBy=multi-user.target

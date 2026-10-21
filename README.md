@@ -40,6 +40,12 @@ NAU-AutoLogin/
 ├── diagnose.py           # 多维只读自检与 AP 诊断工具 (单次运行输出完整状态)
 ├── session_manager.py    # 门户会话管理 (在线列表/强制下线/IP 交接清理, 纯标准库跨平台)
 ├── sessions.py           # 会话管理命令行工具 (列表/下线/流量巡检/历史详单)
+├── linux/                # Linux (树莓派) 部署
+│   ├── nau_keepalive.py  # Linux 保活守护入口 (探测→登录→保活, 复用 session_manager)
+│   └── config.ini.example # Linux 配置模板 (portal_ip / check_interval / 探针)
+├── deploy/               # Linux 部署与升级
+│   ├── nau-autologin.service # systemd 单元模板 (install.sh 渲染占位符)
+│   └── install.sh        # 幂等安装/升级脚本 (releases 软链原子切换, 失败回滚)
 ├── install.ps1           # Windows PowerShell 运维管理脚本 (部署自启、状态、停止等)
 └── README.md             # 本文档
 ```
@@ -184,3 +190,60 @@ python "$env:USERPROFILE\.nau-autologin\sessions.py" -w
 2. **滞回评估（Hysteresis）**：扫描周围所有同 SSID AP，仅当存在信号高出当前 AP `hysteresis_margin`（默认 15%）以上的强信号 AP 时才触发动作，避免在信号接近的 AP 间来回震荡。
 3. **安全选优与会话续期**：执行 `disconnect` 后等待 2 秒再 `connect`，促使 Windows WLAN AutoConfig 重新打分接入优质 AP；重连后立即请求外网 204 探针，若会话失效则自动重新认证。
 4. **冷却保护（Cooldown）**：每次重选后进入 5 分钟冷却期，且设立单日重选上限（默认 15 次），彻底杜绝网络环境全盘异常时的死循环。
+
+---
+
+## 七、Linux 部署（树莓派 dc-pi / i-NAU 门户保活）
+
+面向树莓派等单 `wlan0` 链路设备的**最小保活守护**：`探测外网（204 探针超时 / 被 302 劫持到门户 = 掉线）→ POST 门户登录 → 按 `check_interval` 周期保活`。被踢下线（如手动 kick 自身 IP）后一个周期内自动重登。纯标准库实现，无任何第三方运行时依赖。
+
+**明确不做**（Windows 场景专属）：双网卡故障转移、有线抢占、AP 优选、托盘/单实例互斥体、`sessions.py` 移植。
+
+### 1. 文件与目录约定
+
+| 路径 | 说明 |
+|---|---|
+| `linux/nau_keepalive.py` | 守护入口：探测 → 登录 → 保活，复用 `session_manager` 的 HTTP 层与 `PortalSessionManager`（登录后核验在线列表可见本机 IP） |
+| `linux/config.ini.example` | 配置模板：仅 `portal_ip` / `check_interval` / 探测 URL |
+| `deploy/nau-autologin.service` | systemd 单元模板（`Restart=always`、`WantedBy=multi-user.target`，由安装脚本渲染） |
+| `deploy/install.sh` | 幂等安装/升级：解包 → venv（纯标准库自动跳过）→ 写配置 → `systemctl restart` → 健康检查 |
+| `/opt/nau-autologin/releases/<ver>/` | 各版本完整解包 |
+| `/opt/nau-autologin/current` | 指向当前版本的软链（原子切换，健康检查失败自动回滚） |
+| `~/.nau-autologin/{config.ini,.env}` | 配置与凭据落位（跨版本保留，安装脚本永不覆盖） |
+
+### 2. 快速开始
+
+```bash
+# ① 把仓库目录（或 CI 产出的 tar.gz 包）传到 pi
+scp -r NAU-AutoLogin/ pi@dc-pi:~/          # 或: scp nau-autologin-1.0.0-linux.tar.gz pi@dc-pi:~/
+
+# ② 首次安装（会生成凭据模板）
+sudo ~/NAU-AutoLogin/deploy/install.sh --user pi
+
+# ③ 填写凭据后重新执行一次安装（配置已存在不会覆盖，仅生效服务）
+nano ~/.nau-autologin/.env                  # 填 NAU_USERNAME / NAU_PASSWORD
+sudo ~/NAU-AutoLogin/deploy/install.sh --user pi
+```
+
+安装脚本健康检查会以运行用户执行 `nau_keepalive.py --once` 单轮检测：在 i-NAU 网内会真实登录一次；不在网内属预期（报 WARN 不影响安装）。
+
+### 3. 服务运维
+
+```bash
+journalctl -u nau-autologin -f              # 实时日志（stdout → journald，轮转由 journald 管理）
+sudo systemctl restart nau-autologin        # 重启
+sudo systemctl stop nau-autologin           # 停止
+python3 /opt/nau-autologin/current/linux/nau_keepalive.py --once   # 手动单轮检测/登录
+```
+
+### 4. 升级与回滚
+
+```bash
+sudo ./deploy/install.sh nau-autologin-1.1.0-linux.tar.gz   # 升级 = 解包新版本 + 原子切换软链
+```
+
+重启后健康检查失败时脚本自动回切上一版本软链并重启；新版本保留在 `releases/` 供排查。
+
+### 5. CI/CD 打包约定（供后续 Release 流水线收口）
+
+tar 包名为 `nau-autologin-<ver>-linux.tar.gz`，内容为仓库根目录**平铺**（或单一顶层目录，安装脚本两者兼容），必须包含：`session_manager.py`、`linux/nau_keepalive.py`、`linux/config.ini.example`、`.env.example`。链路：打 tag → GitHub Actions 打包发 Release → pi 定时拉取 → `install.sh` 原子切换 → 失败自动回滚。

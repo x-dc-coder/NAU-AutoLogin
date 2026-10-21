@@ -14,3 +14,4 @@ __pycache__/
 # 本地部署与运行时缓存
 .nau-autologin/
 .portal-keepalive/
+linux/config.ini
