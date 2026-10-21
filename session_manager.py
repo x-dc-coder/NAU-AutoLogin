@@ -46,7 +46,7 @@ from datetime import datetime
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """拦截 302/301 探测重定向"""
-    def redirect_request(self, req, fp, code, msg, newurl):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
 
