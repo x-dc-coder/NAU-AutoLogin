@@ -199,12 +199,24 @@ python "$env:USERPROFILE\.nau-autologin\sessions.py" -w
 
 **明确不做**（Windows 场景专属）：双网卡故障转移、有线抢占、AP 优选、托盘/单实例互斥体、`sessions.py` 移植。
 
+### 认证后端（`auth_type`，2026-11 网络改造）
+
+南审门户已切换到 **Dr.COM 哆点**（`10.255.252.12`）。旧自服务门户（`10.255.254.23`）仍可达，但不再认可新 DHCP 地址：`/api/selfservice/*` 返回 `403 无此用户`，登录返回 `io_reply_code=4 请重新获取地址!`。守护按 `auth_type` 分发，默认 `auto` 依据门户首页指纹自动识别：
+
+| 值 | 登录请求 | 成功判定 |
+|---|---|---|
+| `auto`（默认） | 按指纹选 `drcom` / `legacy` | — |
+| `drcom` | `POST /drcom/login`，表单 `DDDDD`/`upass`/`0MKKey`/`v4ip` | 返回 `Dr.COMWebLoginID_3.htm`；`msga='clientip online'` 视为该出口 IP 已在线 |
+| `legacy` | `POST /api/portal/v1/login` | `reply_code=0` |
+
+Dr.COM 的表单必须 `application/x-www-form-urlencoded`（`session_manager.http_request` 对 dict 走 JSON 编码，守护内部已显式 encode）。
+
 ### 1. 文件与目录约定
 
 | 路径 | 说明 |
 |---|---|
-| `linux/nau_keepalive.py` | 守护入口：探测 → 登录 → 保活，复用 `session_manager` 的 HTTP 层与 `PortalSessionManager`（登录后核验在线列表可见本机 IP） |
-| `linux/config.ini.example` | 配置模板：仅 `portal_ip` / `check_interval` / 探测 URL |
+| `linux/nau_keepalive.py` | 守护入口：探测 → 登录 → 保活；处于掉线分支时才登录，Dr.COM 用 `3.htm` 成功页核验，旧门户用 `PortalSessionManager` 查在线列表 |
+| `linux/config.ini.example` | 配置模板：`portal_ip` / `auth_type` / `check_interval` / 探测 URL |
 | `deploy/nau-autologin.service` | systemd 单元模板（`Restart=always`、`WantedBy=multi-user.target`，由安装脚本渲染） |
 | `deploy/install.sh` | 幂等安装/升级：解包 → venv（纯标准库自动跳过）→ 写配置 → `systemctl restart` → 健康检查 |
 | `/opt/nau-autologin/releases/<ver>/` | 各版本完整解包 |
