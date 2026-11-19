@@ -16,8 +16,10 @@ jobs:
         run: |
           VER="${{ github.ref_name }}"
           TAR="nau-autologin-${VER}-linux.tar.gz"
+          # deploy.yml 必须随包发布：契约预检要求包内存在 deploy.yml，
+          # 且 pi 侧 apply-update.sh 靠它做 contract-check（缺省会跳过校验）。
           git archive --format=tar.gz -o "$TAR" "$VER" \
-            -- session_manager.py sessions.py linux deploy .env.example README.md
+            -- session_manager.py sessions.py linux deploy deploy.yml .env.example README.md
           tar -tzf "$TAR" | head -20
           echo "TAR_NAME=$TAR" >> "$GITHUB_ENV"
 
