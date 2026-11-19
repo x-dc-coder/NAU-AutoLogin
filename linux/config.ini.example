@@ -17,3 +17,8 @@ check_interval = 30
 
 # 外网 204 探针地址: 超时或被 302 劫持到门户即判定掉线 (环境变量 NAU_DETECT_URL 可覆盖)
 detect_url = http://connect.rom.miui.com/generate_204
+
+# IPv6 备用探针: 仅在上面 v4 探针失败时补测一次 (环境变量 NAU_DETECT_URL_V6 可覆盖)
+# 2026-11-19 实测 v4 上游 12%~14% 丢包 / 200ms+ RTT, 而 v6 0 丢包 / 16ms;
+# 留空则禁用 v6 补测 (v4 失败即视为掉线)
+detect_url_v6 = http://cp.cloudflare.com/generate_204

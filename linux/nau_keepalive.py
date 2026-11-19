@@ -40,6 +40,7 @@ import argparse
 import configparser
 import http.client
 import urllib.parse
+import urllib.request
 import urllib.error
 from pathlib import Path
 from typing import Final, Sequence
@@ -60,6 +61,9 @@ DEFAULT_AUTH_TYPE: Final = "auto"     # auto | drcom | legacy
 DRCOM_LOGIN_PATH: Final = "/drcom/login"
 DRCOM_PROBE_MARKERS: Final = ("DrcomServer", "哆点", "eportal")
 DEFAULT_DETECT_URL: Final = "http://connect.rom.miui.com/generate_204"
+# 2026-11-19 实测: IPv4 上游出现 12%~14% 丢包、200ms+ RTT, 而 IPv6 0 丢包 16ms。
+# v4 探针失败时补测 v6, 避免把"v4 路径劣化"误判成"断网"从而触发多余登录。
+DEFAULT_DETECT_URL_V6: Final = "http://cp.cloudflare.com/generate_204"
 DEFAULT_CHECK_INTERVAL: Final = 30
 MIN_CHECK_INTERVAL: Final = 5
 MAX_BACKOFF_SECONDS: Final = 300
@@ -98,6 +102,7 @@ class Settings:
     password: str
     auth_type: str = DEFAULT_AUTH_TYPE
     portal_port: int = 80
+    detect_url_v6: str = DEFAULT_DETECT_URL_V6
 
 
 def log(level, msg):
@@ -147,6 +152,8 @@ def load_settings(config_path=None):
                  or os.environ.get("NAU_PORTAL_IP", "")).strip() or DEFAULT_PORTAL_IP
     detect_url = (cfg.get("portal", "detect_url", fallback="")
                   or os.environ.get("NAU_DETECT_URL", "")).strip() or DEFAULT_DETECT_URL
+    detect_url_v6 = (cfg.get("portal", "detect_url_v6", fallback="")
+                     or os.environ.get("NAU_DETECT_URL_V6", "")).strip() or DEFAULT_DETECT_URL_V6
     interval = cfg.getint("portal", "check_interval", fallback=DEFAULT_CHECK_INTERVAL)
     auth_type = (cfg.get("portal", "auth_type", fallback="")
                  or os.environ.get("NAU_AUTH_TYPE", "")).strip().lower() or DEFAULT_AUTH_TYPE
@@ -159,6 +166,7 @@ def load_settings(config_path=None):
     return Settings(
         portal_ip=portal_ip,
         detect_url=detect_url,
+        detect_url_v6=detect_url_v6,
         check_interval=max(MIN_CHECK_INTERVAL, interval),  # 防配置手误造成请求风暴
         domain=os.environ.get("NAU_DOMAIN", "default").strip() or "default",
         username=username,
@@ -181,20 +189,56 @@ def detect_local_ip(portal_ip):
         return None
 
 
-def probe_internet(detect_url, portal_ip, timeout=PROBE_TIMEOUT):
-    """外网连通探测 (带重定向拦截): 204=通; 200 且正文无门户特征=通;
-    302/超时/异常=被门户劫持或断网。返回 (ok, reason)。"""
-    try:
-        status, body, _ = http_request(detect_url, timeout=timeout, allow_redirects=False)
-    except urllib.error.HTTPError as e:
-        return False, f"HTTP {e.code} (302 劫持到门户?)"
-    except (urllib.error.URLError, http.client.HTTPException, OSError, TimeoutError) as e:
-        return False, f"探测不可达: {e}"
-    if status == 204:
-        return True, "probe 204 OK"
-    if status == 200 and portal_ip not in body and "portal" not in body.lower():
-        return True, "probe 200 OK"
-    return False, f"captive portal 页面特征 (HTTP {status})"
+def _ipv6_opener():
+    """构造强制 IPv6 的 opener: getaddrinfo 限定 AF_INET6, 不依赖解析器排序。
+    仅支持 http:// 探针 (与 detect_url 默认一致); https 探针走系统默认解析。"""
+    class _V6HTTPConnection(http.client.HTTPConnection):
+        def connect(self):
+            # 无 AAAA 时 getaddrinfo 抛 gaierror (OSError 子类), 外层已捕获
+            family, socktype, proto, _canon, sockaddr = socket.getaddrinfo(
+                self.host, self.port or 80, socket.AF_INET6, socket.SOCK_STREAM)[0]
+            sock = socket.socket(family, socktype, proto)
+            sock.settimeout(self.timeout)
+            sock.connect(sockaddr)
+            self.sock = sock
+
+    class _V6HTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(_V6HTTPConnection, req)
+
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _V6HTTPHandler())
+
+
+def probe_internet(detect_url, portal_ip, timeout=PROBE_TIMEOUT, detect_url_v6=""):
+    """外网连通探测 (带重定向拦截): 204=通; 200 且正文无门户特征=通; 302/超时=掉线。
+    v4 优先; v4 失败且配置了 v6 探针时补测一次 IPv6。
+    2026-11-19 实测 v4 上游 12%~14% 丢包而 v6 0 丢包, 单测 v4 会把
+    路径劣化误判成掉线, 触发多余的门户登录。"""
+    def _once(url, force_v6):
+        try:
+            if force_v6:
+                req = urllib.request.Request(url, headers={"User-Agent": "NAU-AutoLogin/2.0"})
+                with _ipv6_opener().open(req, timeout=timeout) as resp:
+                    status, body = resp.getcode(), resp.read().decode("utf-8", errors="replace")
+            else:
+                status, body, _ = http_request(url, timeout=timeout, allow_redirects=False)
+        except urllib.error.HTTPError as e:
+            return False, f"HTTP {e.code} (302 劫持到门户?)"
+        except (urllib.error.URLError, http.client.HTTPException, OSError, TimeoutError) as e:
+            return False, f"探测不可达: {e}"
+        if status == 204:
+            return True, "probe 204 OK"
+        if status == 200 and portal_ip not in body and "portal" not in body.lower():
+            return True, "probe 200 OK"
+        return False, f"captive portal 页面特征 (HTTP {status})"
+
+    ok, reason = _once(detect_url, False)
+    if ok or not detect_url_v6:
+        return ok, reason
+    ok6, reason6 = _once(detect_url_v6, True)
+    if ok6:
+        return True, f"IPv4 不通 [{reason}] / IPv6 正常 [{reason6}]"
+    return False, f"{reason}; IPv6 亦不通 [{reason6}]"
 
 
 def detect_auth_type(portal_ip, configured=DEFAULT_AUTH_TYPE, portal_port=80):
@@ -329,7 +373,8 @@ def run_cycle(settings):
     local_ip = detect_local_ip(settings.portal_ip)
     if local_ip is None:
         return CycleResult.NO_LINK
-    ok, reason = probe_internet(settings.detect_url, settings.portal_ip)
+    ok, reason = probe_internet(settings.detect_url, settings.portal_ip,
+                                detect_url_v6=settings.detect_url_v6)
     if ok:
         return CycleResult.ONLINE
     log("WARN", f"外网探测失败 [{reason}] (ip={local_ip}), 尝试门户登录...")
@@ -353,7 +398,8 @@ def run_daemon(settings):
     cycles = 0
     log("INFO", "=" * 52)
     log("INFO", f"NAU-AutoLogin keepalive started (Linux) portal={settings.portal_ip} user={settings.username}")
-    log("INFO", f"auth={settings.auth_type} probe={settings.detect_url} interval={interval}s")
+    log("INFO", f"auth={settings.auth_type} probe={settings.detect_url} "
+                 f"probe_v6={settings.detect_url_v6} interval={interval}s")
     log("INFO", "=" * 52)
     while True:
         result = None
